@@ -1,103 +1,155 @@
-from functools import wraps
-
-class _Analyser:
-  def __init__(self, debug=False):
-    self._debug = debug
-
-  def debug(func):
-    @wraps(func)
-    def wrap(*args, **kw):
-      if (args[0]._debug):
-        print(f'Running {func.__name__}')
-      return func(*args, **kw)
-    return wrap
-
-  def _current_token(self) -> str:
-    return self._token_list[self._current_position]
+class RegSyntax:
+    L_DELIMITER = "["
+    R_DELIMITER = "]"
+    RANGE_TOKEN = "-"
+    IGNORE_TOKEN = "^"
 
 
-  def _next_token(self):
-    self._current_position += 1
+class RegSyntaxError(Exception):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
-  def _raise_error(self):
-    print(f'Exception: Invalid Syntax at [{self._current_position}]')
-    print(f'  {self._original}')
-    print(f'  {"^":>{self._current_position + 1}}')
+class _RegAnalyser:
+    def __init__(self, syntax: RegSyntax):
+        self._syntax = syntax
 
-  @debug
-  def analyse(self, sentence:str) -> list:
-    self._original = sentence
-    self._token_list = [char for char in sentence]
-    self._current_position = 0
-    self._final_tokens = []
+    def analyse(self, sentence: str):
+        self._sentence = sentence
+        self._finalpos = len(sentence)
+        self._position = 0
 
-    try:
-      self._expression()
-      return self._final_tokens
-    except:
-      self._raise_error()
-      exit(1)
+        self._prev_tk = ""
 
-  @debug
-  def _interval(self):
-    if (self._current_token() == '-'):
-      self._next_token()
-      self._sentence(partial_interval=True)
+        self._to_ignore = False
+        self._tokens = []
+        self._ignoreds = []
 
-    if (self._current_token() == ']'):
-      # EOF
-      return
+        self._base_sentence()
 
-    self._sentence()
-  
-  @debug
-  def _sentence(self, partial_interval=False):
-    if (self._current_token().isalnum()):
-      self._next_token()
+        return self._tokens, self._ignoreds
 
-      if (partial_interval):
-        init = self._original[self._current_position-3]
-        end = self._original[self._current_position-1]
-        self._final_tokens.append([init, end])
-      else:
-        if (self._original[self._current_position] != '-'):
-          unique = self._original[self._current_position-1]
-          self._final_tokens.append([unique])
-
-      self._interval()
-      self._expression()
-    else:
-      self._raise_error()
-
-  @debug
-  def _expression(self) -> bool:
-    if (self._current_position < len(self._token_list)):
-      if (self._current_token() == '['):
-        self._next_token()
-        self._sentence()
-        if (self._current_token() == ']'):
-          self._next_token()
+    def _to_output(self, element: list):
+        if self._to_ignore:
+            self._ignoreds.append(element)
         else:
-          self._raise_error()
-      elif (self._current_token().isalnum()):
-        self._next_token()
-        unique = self._original[self._current_position-1]
-        self._final_tokens.append([unique])
-        self._expression()
+            self._tokens.append(element)
+
+    def _error(self, message: str):
+        raise SyntaxError(
+            "\n"
+            + message
+            + f" at [:{self._position}]"
+            + f"\n\n  {self._sentence}"
+            + f"\n  {'^':>{self._position + 1}}"
+        )
+
+    def _ctoken(self) -> str:
+        return self._sentence[self._position]
+
+    def _next(self):
+        self._position += 1
+
+    def _eof(self):
+        return self._position == self._finalpos
+
+    def _base_sentence(self):
+        if self._ctoken() == self._syntax.L_DELIMITER:
+            self._next()
+            self._sentence_list()
+            if self._ctoken() == self._syntax.R_DELIMITER:
+                self._next()
+            else:
+                self._error(f"'{self._syntax.R_DELIMITER}' Expected")
+        else:
+            self._error(f"'{self._syntax.L_DELIMITER}' Expected")
+
+    def _sentence_list(self):
+        if self._ctoken() == self._syntax.IGNORE_TOKEN:
+            self._to_ignore = True
+            self._next()
+            if self._ctoken() == self._syntax.L_DELIMITER:
+                self._next()
+                if self._ctoken().isalnum():
+                    self._prev_tk = self._ctoken()
+                    self._next()
+                    self._right_side()
+                    if self._ctoken() == self._syntax.R_DELIMITER:
+                        self._to_ignore = False
+                        self._next()
+                        self._sentence_list()
+                    else:
+                        self._error(f"'{self._syntax.R_DELIMITER}' Expected")
+                else:
+                    self._error(
+                        f"'Ignored tokens block ({self._syntax.IGNORE_TOKEN}{self._syntax.L_DELIMITER}{self._syntax.R_DELIMITER}), must not be empty"
+                    )
+            else:
+                raise Exception("[ expected")
+        elif self._ctoken().isalnum():
+            self._prev_tk = self._ctoken()
+            self._next()
+            self._right_side()
+            self._sentence_list()
+
+    def _right_side(self):
+        if self._ctoken() == self._syntax.RANGE_TOKEN:
+            self._next()
+            if self._ctoken().isalnum():
+                self._to_output(
+                    [self._sentence[self._position - 2], self._sentence[self._position]]
+                )
+                self._prev_tk = ""
+                self._next()
+                self._right_side()
+            else:
+                self._error(f"An alphanumerical token [a-zA-z0-9] was expected")
+        elif self._ctoken().isalnum():
+            self._to_output(
+                [
+                    self._prev_tk
+                    if self._prev_tk != ""
+                    else self._sentence[self._position]
+                ]
+            )
+            self._prev_tk = ""
+            self._next()
+            self._right_side()
+
+        if self._prev_tk != "":
+            self._to_output([self._prev_tk])
+            self._prev_tk = ""
 
 
-class reglist:
-  @staticmethod
-  def build(regex):
-    analyser = _Analyser(debug=False)
-    result = analyser.analyse(regex)
-    final_list = []
+def _interval_range(interval: list):
+    ini, end = interval
+    ini = ord(ini)
+    end = ord(end)
 
-    for element in result:
-      if (len(element) == 2):
-        final_list += [chr(char) for char in range(ord(element[0]), ord(element[1]) + 1)]
-      else:
-        final_list += element
+    return (ini, end + 1, 1) if ini <= end else (ini, end - 1, -1)
 
-    return final_list
+
+def reglist(sentence: str, syntax: RegSyntax = RegSyntax()) -> list:
+    analyser = _RegAnalyser(syntax=syntax)
+    result_list = []
+
+    valid_tk = []
+    invalid_tk = []
+    intervals, ignoreds = analyser.analyse(sentence)
+
+    for interval in intervals:
+        if len(interval) == 1:
+            valid_tk += interval[0]
+        else:
+            interval_range = _interval_range(interval)
+            valid_tk += [chr(element) for element in range(*interval_range)]
+
+    for ignored in ignoreds:
+        if len(ignored) == 1:
+            invalid_tk += ignored[0]
+        else:
+            ignored_range = _interval_range(ignored)
+            invalid_tk += [chr(element) for element in range(*ignored_range)]
+
+    return [token for token in valid_tk if token not in invalid_tk]
+
